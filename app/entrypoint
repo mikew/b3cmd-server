@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+#set -e
+
+die () {
+  echo "${1}"
+  exit 1
+}
+
+warn () {
+  echo "WARNING: ${1}"
+}
+
+[ -z "${B3CMD_HOST_PWD}" ] && die "Please set 'B3CMD_HOST_PWD'"
+[ -z "${B3CMD_VIRTUAL_HOST_TEMPLATE}" ] && die "Please set 'B3CMD_VIRTUAL_HOST_TEMPLATE'"
+[ -z "${B3CMD_GIT_TEMPLATE}" ] && die "Please set 'B3CMD_GIT_TEMPLATE'"
+
+{
+  echo "B3CMD_HOST_PWD=${B3CMD_HOST_PWD}"
+  echo "B3CMD_VIRTUAL_HOST_TEMPLATE=${B3CMD_VIRTUAL_HOST_TEMPLATE}"
+  echo "B3CMD_GIT_TEMPLATE=${B3CMD_GIT_TEMPLATE}"
+  echo "B3CMD_DEFAULT_NAMESPACE=${B3CMD_DEFAULT_NAMESPACE:-dev}"
+} > /home/b3cmd/data/server_env
+
+mkdir -p \
+  /home/b3cmd/data/ssh \
+  /home/b3cmd/data/sshd \
+  /home/b3cmd/data/log
+
+# If docker.sock exists, create a docker group matching the sockets group id
+# and add our user to the new group.
+if [ -S "/var/run/docker.sock" ]; then
+  host_docker_gid=$(stat -c %g /var/run/docker.sock)
+  if ! getent group docker; then
+    addgroup -g "${host_docker_gid}" docker
+  fi
+  addgroup b3cmd docker
+fi
+
+# Genereate the SSH host keys and move them to our data volume
+if [ ! -f "/home/b3cmd/data/sshd/ssh_host_dsa_key" ]; then
+  ssh-keygen -A
+  mv /etc/ssh/*key /home/b3cmd/data/sshd
+fi
+
+# Initialize our users SSH folder, if authorized_keys is in the data volume
+# link them up
+mkdir -p /home/b3cmd/.ssh
+touch "/home/b3cmd/data/ssh/authorized_keys"
+if [ ! -f /home/b3cmd/.ssh/authorized_keys ]; then
+  ln -sf /home/b3cmd/data/ssh/authorized_keys /home/b3cmd/.ssh/authorized_keys
+fi
+if [ ! -f /home/b3cmd/data/ssh/id_rsa.pub ]; then
+  ssh-keygen -q -t rsa -b 2048 -N "" -f /home/b3cmd/data/ssh/id_rsa
+fi
+chown b3cmd:b3cmd /home/b3cmd/data/ssh/id_rsa*
+ln -sf /home/b3cmd/data/ssh/id_rsa /home/b3cmd/.ssh/id_rsa
+ln -sf /home/b3cmd/data/ssh/id_rsa.pub /home/b3cmd/.ssh/id_rsa.pub
+chmod 700 /home/b3cmd/.ssh
+chown -R b3cmd:b3cmd /home/b3cmd/.ssh
+
+# Make sure B3CMD_HOST_PWD exists and our user can write to it.
+mkdir -p "${B3CMD_HOST_PWD}"
+chown b3cmd:b3cmd "${B3CMD_HOST_PWD}" || warn "Could not chown ${B3CMD_HOST_PWD}"
+
+touch /home/b3cmd/data/log/sshd
+tail -F -n 0 /home/b3cmd/data/log/sshd &
+exec /usr/sbin/sshd -D -E /home/b3cmd/data/log/sshd
